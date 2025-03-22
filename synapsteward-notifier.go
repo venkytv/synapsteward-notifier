@@ -13,14 +13,20 @@ import (
 )
 
 const (
-	NATS_DEFAULT_URL      = "nats://localhost:4222"
-	NATS_DEFAULT_STREAM   = "notifications"
-	NATS_DEFAULT_CONSUMER = "synapsteward-notifier"
+	NATS_DEFAULT_URL                   = "nats://localhost:4222"
+	NATS_DEFAULT_STREAM                = "notifications"
+	NATS_DEFAULT_CONSUMER              = "synapsteward-notifier"
+	DEFAULT_PUSHOVER_API_TOKEN_SUBJECT = "default"
 )
 
 type NATSAlert struct {
 	Title   string `json:"title"`
 	Message string `json:"message"`
+}
+
+type PushoverApiKey struct {
+	Subject string `json:"subject"`
+	Token   string `json:"token"`
 }
 
 func main() {
@@ -48,10 +54,9 @@ func main() {
 				Sources: cli.EnvVars("NATS_CONSUMER"),
 			},
 			&cli.StringFlag{
-				Name:     "pushover-api-token",
-				Usage:    "Pushover API token",
-				Required: true,
-				Sources:  cli.EnvVars("PUSHOVER_API_TOKEN"),
+				Name:  "pushover-api-tokens-file",
+				Usage: "Pushover API tokens file",
+				Value: os.Getenv("HOME") + "/.pushover-api-tokens.json",
 			},
 			&cli.StringFlag{
 				Name:     "pushover-user-key",
@@ -69,7 +74,7 @@ func main() {
 			natsUrl := cmd.String("nats-url")
 			natsStream := cmd.String("nats-stream")
 			natsConsumer := cmd.String("nats-consumer")
-			pushoverApiToken := cmd.String("pushover-api-token")
+			pushoverApiTokensFile := cmd.String("pushover-api-tokens-file")
 			pushoverUserKey := cmd.String("pushover-user-key")
 			debug := cmd.Bool("debug")
 
@@ -80,6 +85,26 @@ func main() {
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 				Level: logLevel,
 			}))
+
+			// Load list of Pushover API tokens
+			logger.Debug("Loading Pushover API tokens", slog.String("file", pushoverApiTokensFile))
+			pushoverApiTokens := make([]PushoverApiKey, 0)
+			var file *os.File
+			var err error
+			if file, err = os.Open(pushoverApiTokensFile); err != nil {
+				return err
+			}
+			defer file.Close()
+			if err := json.NewDecoder(file).Decode(&pushoverApiTokens); err != nil {
+				return err
+			}
+
+			// Create pushover instances for each API token
+			var instances = make(map[string]*Pushover)
+			for _, token := range pushoverApiTokens {
+				instances[token.Subject] = NewPushover(token.Token, pushoverUserKey,
+					logger.With(slog.String("component", "pushover"), slog.String("subject", token.Subject)))
+			}
 
 			// Connect to NATS
 			logger.Debug("Connecting to NATS", slog.String("url", natsUrl))
@@ -110,11 +135,6 @@ func main() {
 				AckPolicy: jetstream.AckExplicitPolicy,
 			})
 
-			// Create a pushover instance
-			logger.Debug("Creating Pushover instance")
-			pushover := NewPushover(pushoverApiToken, pushoverUserKey,
-				logger.With(slog.String("component", "pushover")))
-
 			// Start listening
 			iter, err := consumer.Messages()
 			for {
@@ -123,6 +143,19 @@ func main() {
 				if err != nil {
 					logger.Error("Error reading message", slog.Any("error", err))
 					break
+				}
+
+				// Check if the subject is in the list of Pushover API tokens
+				subject := msg.Subject()
+				if _, ok := instances[subject]; !ok {
+					logger.Debug("Subject not found in Pushover API tokens", slog.String("subject", subject))
+					// Use the default subject
+					subject = DEFAULT_PUSHOVER_API_TOKEN_SUBJECT
+				}
+				pushover, exists := instances[subject]
+				if !exists {
+					logger.Error("Pushover instance not found", slog.String("subject", subject))
+					continue
 				}
 
 				// Parse JSON message
