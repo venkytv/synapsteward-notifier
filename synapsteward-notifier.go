@@ -102,6 +102,7 @@ func main() {
 			// Create pushover instances for each API token
 			var instances = make(map[string]*Pushover)
 			for _, token := range pushoverApiTokens {
+				logger.Debug("Creating Pushover instance", slog.String("subject", token.Subject))
 				instances[token.Subject] = NewPushover(token.Token, pushoverUserKey,
 					logger.With(slog.String("component", "pushover"), slog.String("subject", token.Subject)))
 			}
